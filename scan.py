@@ -18,6 +18,7 @@ def scan_folder(folder):
     bad_names = []
     old_files = []
     deep_files = []
+    loose_files = []  # NEW
     now = time.time()
 
     for file in folder.rglob("*"):
@@ -49,6 +50,8 @@ def scan_folder(folder):
         depth = len(file.relative_to(folder).parts) - 1
         if depth > MAX_DEPTH:
             deep_files.append((relative, depth))
+        if depth == 0:  # NEW: file is not inside any folder
+            loose_files.append(relative)  # NEW
 
     duplicate_groups = []
     wasted_size = 0
@@ -66,7 +69,9 @@ def scan_folder(folder):
         "bad_names": bad_names,
         "old_files": old_files,
         "deep_files": deep_files,
+        "loose_files": loose_files,  # NEW
     }
+
 
 def name_score(path):
     """Lower score = cleaner name. Used to pick which duplicate to keep."""
@@ -116,7 +121,11 @@ def print_report(results):
     for path, depth in results["deep_files"]:
         print(f"  - {path}  ({depth} levels)")
 
+    print(f"\nLoose files, not in any folder ({len(results['loose_files'])}):")  # NEW
+    for path in results["loose_files"]:  # NEW
+        print(f"  - {path}")  # NEW
+
 
 if __name__ == "__main__":
-    results = scan_folder(Path("test-folder"))
+    results = scan_folder(Path("demo-drive"))  # CHANGED: was test-folder
     print_report(results)

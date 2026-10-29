@@ -40,7 +40,7 @@ else:
     for path, content, age_days in FILES:
         file = DEMO / path
         file.parent.mkdir(parents=True, exist_ok=True)
-        file.write_text(f"Demo file: {content}")
+        file.write_text(f"Demo file: {content}\n" * 20000)
         old_time = time.time() - age_days * DAY
         os.utime(file, (old_time, old_time))
     print(f"Created {len(FILES)} demo files in '{DEMO}'.")
