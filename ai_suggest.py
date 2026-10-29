@@ -1,66 +1,115 @@
 import ollama
+from collections import defaultdict
 from pathlib import Path
+from typing import Literal
+from pydantic import BaseModel
 from folder_map import get_folder_map
 from scan import scan_folder, choose_keeper
 
 MODEL = "gemma4"
-folder = Path("test-folder")
+REVIEW_FOLDER = "_To Review"
+folder = Path("demo-drive")
 
+
+# The exact shape we want the AI's answer in
+class Placement(BaseModel):
+    file: str
+    folder: str
+    confidence: Literal["high", "medium", "low"]
+    reason: str
+
+
+class Plan(BaseModel):
+    placements: list[Placement]
+
+
+def decide_destinations(plan, loose_files, allowed_folders):
+    """Turn AI suggestions into final destinations. Anything doubtful goes to review."""
+    destinations = {}
+    for p in plan.placements:
+        if p.file not in loose_files or p.file in destinations:
+            continue
+        folder_name = p.folder.strip("/")
+        if folder_name not in allowed_folders:
+            destinations[p.file] = (REVIEW_FOLDER, f"AI suggested unknown folder '{p.folder}'")
+        elif p.confidence != "high":
+            destinations[p.file] = (REVIEW_FOLDER, f"{p.confidence} confidence: {p.reason}")
+        else:
+            destinations[p.file] = (folder_name, p.reason)
+
+    for file in loose_files:
+        if file not in destinations:
+            destinations[file] = (REVIEW_FOLDER, "AI did not place this file")
+    return destinations
+
+
+# ---------- STAGE 1: gather the facts with code ----------
 folder_map = get_folder_map(folder)
 results = scan_folder(folder)
 
-# Decide deletions in code: every duplicate except the keeper
-to_delete = set()
+to_delete = {}
 for group in results["duplicate_groups"]:
     keeper = choose_keeper(group)
     for path in group:
         if path != keeper:
-            to_delete.add(path)
+            to_delete[path] = keeper
 
-# Only show the AI files that will remain after duplicates are removed
-clean_map = []
+existing_folders = set()
+loose_entries = []
+loose_files = set()
 for entry in folder_map:
     path = entry.split("  (modified")[0]
-    if path not in to_delete:
-        clean_map.append(entry)
-file_list = "\n".join(clean_map)
+    if path.endswith("/"):
+        existing_folders.add(path.strip("/"))
+    elif "/" not in path and path not in to_delete:
+        loose_entries.append(entry)
+        loose_files.add(path)
 
-old_lines = []
-for path, age in results["old_files"]:
-    if path not in to_delete:
-        old_lines.append(f"{path} ({age // 365} years old)")
-old_text = "\n".join(old_lines) or "None"
+allowed_folders = existing_folders | {REVIEW_FOLDER}
 
-prompt = f"""You are an expert at organising business files.
+# ---------- STAGE 2: ask the AI to sort the loose files ----------
+folders_text = "\n".join(sorted(allowed_folders))
+files_text = "\n".join(loose_entries)
 
-FOLDER CONTENTS (names and last-modified dates only):
-{file_list}
+prompt = f"""You are helping tidy a company's shared drive.
 
-FILES CONFIRMED AS OLD (not changed in over 2 years):
-{old_text}
+EXISTING FOLDERS (you may ONLY use these):
+{folders_text}
 
-YOUR TASKS:
-1. Suggest a clean folder structure, at most 3 levels deep, shown as an indented tree. Include an Archive folder.
-2. Suggest a file naming convention, with 2 examples renaming real files from the list.
-3. Pick up to 10 files and say which new folder each should move to.
+LOOSE FILES TO SORT (names and last-modified dates):
+{files_text}
 
-RULES YOU MUST FOLLOW:
-- Do NOT suggest deleting any files. Duplicates have already been handled.
-- Only files listed under FILES CONFIRMED AS OLD may go to the Archive folder.
-- The current year is 2026.
-- Dates in file names use YYYY-MM-DD. Only use the real modified dates shown above. Never invent dates.
-- New file names must never contain "final", "copy", "new" or numbers in brackets like "(1)".
-- Always keep the original file extension.
-- Your own examples must follow every rule above.
-- Only refer to files that appear in the list above, spelled exactly as shown.
+For every loose file, choose the single best folder from the list.
+- Use "{REVIEW_FOLDER}" if no folder clearly fits, or the file name is too vague to tell.
+- confidence: "high" only if you are sure. Otherwise "medium" or "low".
+- reason: a few words explaining your choice.
+- Use file names exactly as shown, without the modified date.
+- Never invent folders."""
 
-Be practical and concise."""
-
-print(f"Asking {MODEL} to analyse {len(clean_map)} items ({len(to_delete)} duplicates already removed)...\n")
+print(f"Asking {MODEL} to sort {len(loose_files)} loose files into {len(existing_folders)} folders...\n")
 
 response = ollama.chat(
     model=MODEL,
     messages=[{"role": "user", "content": prompt}],
+    format=Plan.model_json_schema(),
+    options={"temperature": 0, "seed": 42},
 )
+plan = Plan.model_validate_json(response["message"]["content"])
 
-print(response["message"]["content"])
+# ---------- STAGE 3: the code makes the final decisions ----------
+destinations = decide_destinations(plan, loose_files, allowed_folders)
+
+# ---------- STAGE 4: show the plan ----------
+print(f"DUPLICATES TO DELETE ({len(to_delete)}):")
+for path, keeper in sorted(to_delete.items()):
+    print(f"  - {path}  (copy of {keeper})")
+
+by_folder = defaultdict(list)
+for file, (destination, reason) in destinations.items():
+    by_folder[destination].append((file, reason))
+
+print(f"\nFILES TO MOVE ({len(destinations)}):")
+for destination in sorted(by_folder):
+    print(f"\n  {destination}/")
+    for file, reason in by_folder[destination]:
+        print(f"    - {file}  ({reason})")
